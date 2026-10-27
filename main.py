@@ -1,5 +1,4 @@
 import os
-import json
 import telebot
 import requests
 from flask import Flask
@@ -34,30 +33,35 @@ def clean_number(text):
     return text.strip().replace("+", "").replace(" ", "").replace("-", "")
 
 
-# সম্ভাব্য সব endpoint path — একটা কাজ করলেই হবে
-ENDPOINT_PATTERNS = [
-    "/search/{number}",
-    "/v1/search/{number}",
-    "/search?q={number}",
-    "/search?number={number}",
-    "/v1/search?number={number}",
-    "/api/search/{number}",
-    "/lookup?number={number}",
-    "/phone/{number}",
-]
-
-
 def call_api(number):
-    """প্রথম সফল (status 200 + JSON-এ data) রেসপন্স রিটার্ন করবে।"""
+    """
+    প্রথমে /api/v1/getDetails চেষ্টা করে (query param সহ)।
+    실패하면 অন্যান্য সম্ভাব্য path-ও ট্রাই করে।
+    """
     headers = {
         "x-rapidapi-key": API_KEY,
         "x-rapidapi-host": API_HOST,
         "Content-Type": "application/json",
     }
+
+    # --- প্রধান চেষ্টা: /api/v1/getDetails ---
+    # countryCode ছাড়া এবং BD সহ দুভাবেই চেষ্টা করি
+    candidate_urls = [
+        f"https://{API_HOST}/api/v1/getDetails?phone={number}",
+        f"https://{API_HOST}/api/v1/getDetails?phone={number}&countryCode=BD",
+    ]
+
+    # --- ব্যাকআপ প্যাটার্ন (যদি উপরেরটা কাজ না করে) ---
+    backup_patterns = [
+        "/api/v1/search?phone={number}",
+        "/api/v1/search?number={number}",
+        "/search/{number}",
+    ]
+    for p in backup_patterns:
+        candidate_urls.append(f"https://{API_HOST}{p.format(number=number)}")
+
     last_response = None
-    for pattern in ENDPOINT_PATTERNS:
-        path = pattern.format(number=number)
-        url = f"https://{API_HOST}{path}"
+    for url in candidate_urls:
         try:
             r = requests.get(url, headers=headers, timeout=15)
             print(f"[TRY] {url} → {r.status_code}")
@@ -66,13 +70,11 @@ def call_api(number):
                     body = r.json()
                 except Exception:
                     continue
-                # 200 এলেই থামি, তবে 200-এও খালি data থাকতে পারে
-                if isinstance(body, dict):
-                    # যদি স্পষ্ট error message থাকে (message field + data নেই), try next
-                    if body.get("message") and not body.get("data"):
-                        last_response = r
-                        continue
-                    return r
+                if isinstance(body, dict) and body.get("message") and not body.get("data"):
+                    # স্পষ্ট error message, পরেরটা চেষ্টা করি
+                    last_response = r
+                    continue
+                return r
             else:
                 last_response = r
         except Exception as e:
@@ -94,11 +96,10 @@ def deep_get(obj, path, default=None):
 
 
 def extract_info(result):
-    """একাধিক সম্ভাব্য স্ট্রাকচার থেকে নাম/অপারেটর/লোকেশন বের করার চেষ্টা।"""
-    # data/result/results ভেতরে যাও
+    """বিভিন্ন সম্ভাব্য JSON স্ট্রাকচার থেকে তথ্য বের করার চেষ্টা।"""
     roots = [result]
     if isinstance(result, dict):
-        for key in ("data", "result", "results", "record"):
+        for key in ("data", "result", "results", "record", "phoneInfo"):
             if isinstance(result.get(key), dict):
                 roots.append(result[key])
 
@@ -114,35 +115,28 @@ def extract_info(result):
         ("basicInfo", "name", "fullName"),
         ("basicInfo", "name"),
         ("name", "fullName"),
-        ("name",),
         ("fullName",),
-        ("owner",),
-        ("ownerName",),
+        ("name",),
     ])
     carrier = find([
         ("phoneInfo", "carrier"),
         ("carrier",),
         ("operator",),
-        ("network",),
-        ("sim",),
     ])
     country_code = find([
         ("phoneInfo", "countryCode"),
         ("addressInfo", "countryCode"),
         ("countryCode",),
-        ("country",),
     ])
     number_type = find([
         ("phoneInfo", "numberType"),
         ("numberType",),
         ("type",),
-        ("lineType",),
     ])
     e164 = find([
         ("phoneInfo", "e164Format"),
         ("e164Format",),
         ("number",),
-        ("phone",),
     ])
     city = find([("addressInfo", "city"), ("city",)])
     address = find([("addressInfo", "address"), ("address",)])
@@ -212,9 +206,10 @@ def handle_message(message):
 
         if response is None:
             bot.edit_message_text(
-                "❌ কোনো এন্ডপয়েন্টে কানেক্ট করা যায়নি। `/debug {number}` দিয়ে চেক করুন।",
+                f"❌ কোনো এন্ডপয়েন্টে কানেক্ট করা যায়নি। `/debug {number}` দিয়ে চেক করুন।",
                 chat_id=message.chat.id,
-                message_id=status_message.message_id
+                message_id=status_message.message_id,
+                parse_mode='Markdown'
             )
             return
 
@@ -257,8 +252,7 @@ def handle_message(message):
         else:
             reply_text = (
                 "🔍 কোনো নির্দিষ্ট তথ্য পাওয়া যায়নি।\n\n"
-                f"**Debug:** status `{response.status_code}`, "
-                f"URL: `{response.url}`\n"
+                f"**Debug:** status `{response.status_code}`, URL: `{response.url}`\n"
                 f"বিস্তারিত দেখতে: `/debug {number}`"
             )
 
