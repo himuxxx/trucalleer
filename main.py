@@ -6,7 +6,7 @@ from threading import Thread
 
 # ===== সব ক্রেডেনশিয়াল কোডেই হার্ডকোড =====
 BOT_TOKEN = "8426186448:AAGwsyr411H5f9rlEegnhCiXrMqk11B-eeo"
-API_KEY = "d07fab1250mshc9767ae002ca827p1e76a6jsn32e608140359"
+API_KEY = "c2695c3da9mshc4a38393870e76dp1dcdf4jsn0c9ff4634700"
 API_HOST = "truecaller-data2.p.rapidapi.com"
 # ==========================================
 
