@@ -1,10 +1,14 @@
+import os
 import telebot
 import requests
-from flask import Flask, request
+from flask import Flask
+from threading import Thread
 
+# ===== সব ক্রেডেনশিয়াল কোডেই হার্ডকোড =====
 BOT_TOKEN = "8426186448:AAGwsyr411H5f9rlEegnhCiXrMqk11B-eeo"
 API_KEY = "d07fab1250mshc9767ae002ca827p1e76a6jsn32e608140359"
 API_HOST = "truecaller-data2.p.rapidapi.com"
+# ==========================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -15,24 +19,14 @@ def home():
     return "Bot is alive and running 24/7!"
 
 
-@app.route('/setwebhook')
-def set_webhook():
-    host = request.host_url.rstrip('/')
-    webhook_url = f"{host}/{BOT_TOKEN}"
-    r = requests.get(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
-    )
-    return r.json()
+@app.route('/health')
+def health():
+    return "OK"
 
 
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    return '', 403
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 
 @bot.message_handler(commands=['start', 'help'])
@@ -72,7 +66,7 @@ def handle_message(message):
         if response.status_code in (401, 403) or "message" in result:
             api_msg = result.get("message", "Limit Exceeded or Unauthorized")
             bot.edit_message_text(
-                f"⚠️ **API সমস্যা:** আপনার RapidAPI-এর ফ্রি লিমিট শেষ অথবা কি (Key) ব্লক হয়েছে।\n"
+                f"⚠️ **API সমস্যা:** আপনার RapidAPI-এর ফ্রি লিমিট শেষ অথবা কি (Key) ব্লক হয়েছে।\n"
                 f"`সার্ভার মেসেজ: {api_msg}`",
                 chat_id=message.chat.id,
                 message_id=status_message.message_id,
@@ -110,5 +104,10 @@ def handle_message(message):
         )
 
 
-# Vercel serverless entry-point (Flask WSGI app)
-handler = app
+if __name__ == "__main__":
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+    print("Bot is polling...")
+    bot.polling(none_stop=True, interval=0, timeout=20)
