@@ -8,7 +8,7 @@ from threading import Thread
 # ===== ক্রেডেনশিয়াল =====
 BOT_TOKEN = "8426186448:AAGwsyr411H5f9rlEegnhCiXrMqk11B-eeo"
 API_KEY = "c2695c3da9mshc4a38393870e76dp1dcdf4jsn0c9ff4634700"
-API_HOST = "truecaller-data2.p.rapidapi.com"
+API_HOST = "truecaller4.p.rapidapi.com"
 # =======================
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -34,17 +34,128 @@ def clean_number(text):
     return text.strip().replace("+", "").replace(" ", "").replace("-", "")
 
 
+# সম্ভাব্য সব endpoint path — একটা কাজ করলেই হবে
+ENDPOINT_PATTERNS = [
+    "/search/{number}",
+    "/v1/search/{number}",
+    "/search?q={number}",
+    "/search?number={number}",
+    "/v1/search?number={number}",
+    "/api/search/{number}",
+    "/lookup?number={number}",
+    "/phone/{number}",
+]
+
+
 def call_api(number):
-    url = f"https://{API_HOST}/search/{number}"
+    """প্রথম সফল (status 200 + JSON-এ data) রেসপন্স রিটার্ন করবে।"""
     headers = {
         "x-rapidapi-key": API_KEY,
         "x-rapidapi-host": API_HOST,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
-    response = requests.get(url, headers=headers, timeout=15)
-    print(f"[API] {url} → {response.status_code}")
-    print(f"[API] Response body (first 1000 chars): {response.text[:1000]}")
-    return response
+    last_response = None
+    for pattern in ENDPOINT_PATTERNS:
+        path = pattern.format(number=number)
+        url = f"https://{API_HOST}{path}"
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            print(f"[TRY] {url} → {r.status_code}")
+            if r.status_code == 200:
+                try:
+                    body = r.json()
+                except Exception:
+                    continue
+                # 200 এলেই থামি, তবে 200-এও খালি data থাকতে পারে
+                if isinstance(body, dict):
+                    # যদি স্পষ্ট error message থাকে (message field + data নেই), try next
+                    if body.get("message") and not body.get("data"):
+                        last_response = r
+                        continue
+                    return r
+            else:
+                last_response = r
+        except Exception as e:
+            print(f"[TRY] {url} → Error: {e}")
+            continue
+    return last_response
+
+
+def deep_get(obj, path, default=None):
+    cur = obj
+    for k in path:
+        if isinstance(cur, dict):
+            cur = cur.get(k)
+        else:
+            return default
+        if cur is None:
+            return default
+    return cur
+
+
+def extract_info(result):
+    """একাধিক সম্ভাব্য স্ট্রাকচার থেকে নাম/অপারেটর/লোকেশন বের করার চেষ্টা।"""
+    # data/result/results ভেতরে যাও
+    roots = [result]
+    if isinstance(result, dict):
+        for key in ("data", "result", "results", "record"):
+            if isinstance(result.get(key), dict):
+                roots.append(result[key])
+
+    def find(paths):
+        for root in roots:
+            for p in paths:
+                v = deep_get(root, p)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return ""
+
+    name = find([
+        ("basicInfo", "name", "fullName"),
+        ("basicInfo", "name"),
+        ("name", "fullName"),
+        ("name",),
+        ("fullName",),
+        ("owner",),
+        ("ownerName",),
+    ])
+    carrier = find([
+        ("phoneInfo", "carrier"),
+        ("carrier",),
+        ("operator",),
+        ("network",),
+        ("sim",),
+    ])
+    country_code = find([
+        ("phoneInfo", "countryCode"),
+        ("addressInfo", "countryCode"),
+        ("countryCode",),
+        ("country",),
+    ])
+    number_type = find([
+        ("phoneInfo", "numberType"),
+        ("numberType",),
+        ("type",),
+        ("lineType",),
+    ])
+    e164 = find([
+        ("phoneInfo", "e164Format"),
+        ("e164Format",),
+        ("number",),
+        ("phone",),
+    ])
+    city = find([("addressInfo", "city"), ("city",)])
+    address = find([("addressInfo", "address"), ("address",)])
+    location_parts = [p for p in [city, address, country_code] if p]
+    location = ", ".join(location_parts)
+
+    return {
+        "name": name,
+        "carrier": carrier,
+        "location": location,
+        "number_type": number_type,
+        "e164": e164,
+    }
 
 
 @bot.message_handler(commands=['start', 'help'])
@@ -53,9 +164,10 @@ def send_welcome(message):
         "🤖 Welcome to Real Number Search Bot!\n\n"
         "🔍 যেকোনো মোবাইল নম্বরের অপারেটর ও লোকেশন জানতে দেশের কোড সহ নম্বরটি লিখে পাঠান।\n"
         "👉 উদাহরণ (India): +91XXXXXXXXXX\n"
-        "👉 উদাহরণ (Bangladesh): +880XXXXXXXXXX"
+        "👉 উদাহরণ (Bangladesh): +880XXXXXXXXXX\n\n"
+        "🐞 ডিবাগ: `/debug 8801810766980`"
     )
-    bot.reply_to(message, welcome_text)
+    bot.reply_to(message, welcome_text, parse_mode='Markdown')
 
 
 @bot.message_handler(commands=['debug'])
@@ -67,6 +179,9 @@ def debug_cmd(message):
     number = clean_number(parts[1])
     try:
         response = call_api(number)
+        if response is None:
+            bot.reply_to(message, "❌ কোনো endpoint-ই রেসপন্স দেয়নি।")
+            return
         text = response.text
         if len(text) > 3500:
             text = text[:3500] + "...(truncated)"
@@ -95,11 +210,19 @@ def handle_message(message):
     try:
         response = call_api(number)
 
+        if response is None:
+            bot.edit_message_text(
+                "❌ কোনো এন্ডপয়েন্টে কানেক্ট করা যায়নি। `/debug {number}` দিয়ে চেক করুন।",
+                chat_id=message.chat.id,
+                message_id=status_message.message_id
+            )
+            return
+
         try:
             result = response.json()
         except Exception:
             bot.edit_message_text(
-                f"❌ API থেকে ভুল রেসপন্স এসেছে (JSON নয়)।\nStatus: {response.status_code}\n"
+                f"❌ API থেকে JSON নয় এমন রেসপন্স (status `{response.status_code}`)\n"
                 f"`{response.text[:300]}`",
                 chat_id=message.chat.id,
                 message_id=status_message.message_id,
@@ -107,58 +230,36 @@ def handle_message(message):
             )
             return
 
-        # API এরর চেক (তবে data থাকলে এরর হিসেবে ধরা হবে না)
+        # API এরর (401/403/429 বা message-only)
         if response.status_code in (401, 403, 429) or (
-            isinstance(result, dict) and "message" in result and not result.get("data")
+            isinstance(result, dict) and result.get("message") and not result.get("data")
         ):
             api_msg = (result.get("message") if isinstance(result, dict) else "") or "Unknown error"
             bot.edit_message_text(
-                f"⚠️ **API সমস্যা** (status `{response.status_code}`)\n"
-                f"`{api_msg}`",
+                f"⚠️ **API সমস্যা** (status `{response.status_code}`)\n`{api_msg}`",
                 chat_id=message.chat.id,
                 message_id=status_message.message_id,
                 parse_mode='Markdown'
             )
             return
 
-        # ---- নেস্টেড স্ট্রাকচার থেকে ডেটা বের করা ----
-        data = (result.get("data") if isinstance(result, dict) else None) or {}
-        basic_info = data.get("basicInfo") or {}
-        name_info = basic_info.get("name") or {}
-        phone_info = data.get("phoneInfo") or {}
-        address_info = data.get("addressInfo") or {}
+        info = extract_info(result)
 
-        name = (name_info.get("fullName") or "").strip()
-        carrier = (phone_info.get("carrier") or "").strip()
-        country_code = (phone_info.get("countryCode") or address_info.get("countryCode") or "").strip()
-        number_type = (phone_info.get("numberType") or "").strip()
-        e164 = phone_info.get("e164Format") or f"+{number}"
-        city = (address_info.get("city") or "").strip()
-        address = (address_info.get("address") or "").strip()
-
-        location_parts = [p for p in [city, address, country_code] if p]
-        location = ", ".join(location_parts)
-
-        if name or carrier or location:
+        if info["name"] or info["carrier"] or info["location"]:
             reply_text = (
                 f"🔍 **Real Result Found ✅**\n\n"
-                f"📱 **Number:** {e164}\n"
-                f"👤 **Name:** {name or 'পাওয়া যায়নি'}\n"
-                f"📶 **SIM Operator:** {carrier or 'পাওয়া যায়নি'}\n"
-                f"📍 **Location:** {location or 'পাওয়া যায়নি'}\n"
-                f"📞 **Type:** {number_type or 'পাওয়া যায়নি'}"
+                f"📱 **Number:** {info['e164'] or '+' + number}\n"
+                f"👤 **Name:** {info['name'] or 'পাওয়া যায়নি'}\n"
+                f"📶 **SIM Operator:** {info['carrier'] or 'পাওয়া যায়নি'}\n"
+                f"📍 **Location:** {info['location'] or 'পাওয়া যায়নি'}\n"
+                f"📞 **Type:** {info['number_type'] or 'পাওয়া যায়নি'}"
             )
         else:
-            # ডিবাগ তথ্য — সাথে সাথে বুঝতে পারবেন কী এসেছে
-            dbg_keys = list(data.keys()) if isinstance(data, dict) else "N/A"
             reply_text = (
                 "🔍 কোনো নির্দিষ্ট তথ্য পাওয়া যায়নি।\n\n"
-                f"**Debug:**\n"
-                f"- Status: `{response.status_code}`\n"
-                f"- `error`: `{result.get('error') if isinstance(result, dict) else 'N/A'}`\n"
-                f"- `data` keys: `{dbg_keys}`\n"
-                f"- `basicInfo` keys: `{list(basic_info.keys())}`\n\n"
-                f"সঠিক ডিবাগ পেতে `/debug {number}` পাঠান।"
+                f"**Debug:** status `{response.status_code}`, "
+                f"URL: `{response.url}`\n"
+                f"বিস্তারিত দেখতে: `/debug {number}`"
             )
 
         bot.edit_message_text(
