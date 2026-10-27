@@ -1,14 +1,15 @@
 import os
+import json
 import telebot
 import requests
 from flask import Flask
 from threading import Thread
 
-# ===== সব ক্রেডেনশিয়াল কোডেই হার্ডকোড =====
+# ===== ক্রেডেনশিয়াল =====
 BOT_TOKEN = "8426186448:AAGwsyr411H5f9rlEegnhCiXrMqk11B-eeo"
 API_KEY = "c2695c3da9mshc4a38393870e76dp1dcdf4jsn0c9ff4634700"
 API_HOST = "truecaller-data2.p.rapidapi.com"
-# ==========================================
+# =======================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -29,6 +30,23 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 
+def clean_number(text):
+    return text.strip().replace("+", "").replace(" ", "").replace("-", "")
+
+
+def call_api(number):
+    url = f"https://{API_HOST}/search/{number}"
+    headers = {
+        "x-rapidapi-key": API_KEY,
+        "x-rapidapi-host": API_HOST,
+        "Content-Type": "application/json"
+    }
+    response = requests.get(url, headers=headers, timeout=15)
+    print(f"[API] {url} → {response.status_code}")
+    print(f"[API] Response body (first 1000 chars): {response.text[:1000]}")
+    return response
+
+
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     welcome_text = (
@@ -40,9 +58,31 @@ def send_welcome(message):
     bot.reply_to(message, welcome_text)
 
 
+@bot.message_handler(commands=['debug'])
+def debug_cmd(message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(message, "Usage: `/debug 8801810766980`", parse_mode='Markdown')
+        return
+    number = clean_number(parts[1])
+    try:
+        response = call_api(number)
+        text = response.text
+        if len(text) > 3500:
+            text = text[:3500] + "...(truncated)"
+        bot.reply_to(
+            message,
+            f"**Status:** `{response.status_code}`\n**URL:** `{response.url}`\n\n"
+            f"```json\n{text}\n```",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: `{e}`", parse_mode='Markdown')
+
+
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    number = message.text.strip().replace("+", "").replace(" ", "").replace("-", "")
+    number = clean_number(message.text)
 
     if not number.isdigit():
         bot.reply_to(message, "⚠️ অনুগ্রহ করে শুধুমাত্র একটি সঠিক নম্বর ইনপুট করুন!")
@@ -52,48 +92,53 @@ def handle_message(message):
         message, "🔍 লাইভ ডেটাবেসে খোঁজা হচ্ছে... অনুগ্রহ করে অপেক্ষা করুন..."
     )
 
-    url = f"https://{API_HOST}/search/{number}"
-    headers = {
-        "x-rapidapi-key": API_KEY,
-        "x-rapidapi-host": API_HOST,
-        "Content-Type": "application/json"
-    }
-
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        result = response.json()
+        response = call_api(number)
 
-        # ---- API এরর চেক ----
-        if response.status_code in (401, 403) or "message" in result:
-            api_msg = result.get("message", "Limit Exceeded or Unauthorized")
+        try:
+            result = response.json()
+        except Exception:
             bot.edit_message_text(
-                f"⚠️ **API সমস্যা:** আপনার RapidAPI-এর ফ্রি লিমিট শেষ অথবা কি (Key) ব্লক হয়েছে।\n"
-                f"`সার্ভার মেসেজ: {api_msg}`",
+                f"❌ API থেকে ভুল রেসপন্স এসেছে (JSON নয়)।\nStatus: {response.status_code}\n"
+                f"`{response.text[:300]}`",
                 chat_id=message.chat.id,
                 message_id=status_message.message_id,
                 parse_mode='Markdown'
             )
             return
 
-        # ---- আসল নেস্টেড স্ট্রাকচার থেকে ডেটা বের করা ----
-        data = result.get("data") or {}
+        # API এরর চেক (তবে data থাকলে এরর হিসেবে ধরা হবে না)
+        if response.status_code in (401, 403, 429) or (
+            isinstance(result, dict) and "message" in result and not result.get("data")
+        ):
+            api_msg = (result.get("message") if isinstance(result, dict) else "") or "Unknown error"
+            bot.edit_message_text(
+                f"⚠️ **API সমস্যা** (status `{response.status_code}`)\n"
+                f"`{api_msg}`",
+                chat_id=message.chat.id,
+                message_id=status_message.message_id,
+                parse_mode='Markdown'
+            )
+            return
+
+        # ---- নেস্টেড স্ট্রাকচার থেকে ডেটা বের করা ----
+        data = (result.get("data") if isinstance(result, dict) else None) or {}
         basic_info = data.get("basicInfo") or {}
         name_info = basic_info.get("name") or {}
         phone_info = data.get("phoneInfo") or {}
         address_info = data.get("addressInfo") or {}
 
-        name = name_info.get("fullName") or ""
-        carrier = phone_info.get("carrier") or ""
-        country_code = phone_info.get("countryCode") or address_info.get("countryCode") or ""
-        number_type = phone_info.get("numberType") or ""
+        name = (name_info.get("fullName") or "").strip()
+        carrier = (phone_info.get("carrier") or "").strip()
+        country_code = (phone_info.get("countryCode") or address_info.get("countryCode") or "").strip()
+        number_type = (phone_info.get("numberType") or "").strip()
         e164 = phone_info.get("e164Format") or f"+{number}"
-        city = address_info.get("city") or ""
-        address = address_info.get("address") or ""
+        city = (address_info.get("city") or "").strip()
+        address = (address_info.get("address") or "").strip()
 
         location_parts = [p for p in [city, address, country_code] if p]
         location = ", ".join(location_parts)
 
-        # ---- রেজাল্ট তৈরি ----
         if name or carrier or location:
             reply_text = (
                 f"🔍 **Real Result Found ✅**\n\n"
@@ -104,7 +149,17 @@ def handle_message(message):
                 f"📞 **Type:** {number_type or 'পাওয়া যায়নি'}"
             )
         else:
-            reply_text = "🔍 কোনো নির্দিষ্ট তথ্য পাওয়া যায়নি। নম্বরটি সঠিক কিনা চেক করুন।"
+            # ডিবাগ তথ্য — সাথে সাথে বুঝতে পারবেন কী এসেছে
+            dbg_keys = list(data.keys()) if isinstance(data, dict) else "N/A"
+            reply_text = (
+                "🔍 কোনো নির্দিষ্ট তথ্য পাওয়া যায়নি।\n\n"
+                f"**Debug:**\n"
+                f"- Status: `{response.status_code}`\n"
+                f"- `error`: `{result.get('error') if isinstance(result, dict) else 'N/A'}`\n"
+                f"- `data` keys: `{dbg_keys}`\n"
+                f"- `basicInfo` keys: `{list(basic_info.keys())}`\n\n"
+                f"সঠিক ডিবাগ পেতে `/debug {number}` পাঠান।"
+            )
 
         bot.edit_message_text(
             reply_text,
@@ -114,11 +169,12 @@ def handle_message(message):
         )
 
     except Exception as e:
-        print("Error:", e)  # Render log-এ দেখতে পাবেন
+        print("Error:", e)
         bot.edit_message_text(
-            "❌ এপিআই সার্ভারে কানেক্ট করতে সমস্যা হচ্ছে। দয়া করে একটু পর চেষ্টা করুন।",
+            f"❌ এরর: `{e}`",
             chat_id=message.chat.id,
-            message_id=status_message.message_id
+            message_id=status_message.message_id,
+            parse_mode='Markdown'
         )
 
 
