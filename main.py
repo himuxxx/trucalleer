@@ -42,7 +42,7 @@ def send_welcome(message):
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    number = message.text.strip().replace("+", "")
+    number = message.text.strip().replace("+", "").replace(" ", "").replace("-", "")
 
     if not number.isdigit():
         bot.reply_to(message, "⚠️ অনুগ্রহ করে শুধুমাত্র একটি সঠিক নম্বর ইনপুট করুন!")
@@ -63,6 +63,7 @@ def handle_message(message):
         response = requests.get(url, headers=headers, timeout=10)
         result = response.json()
 
+        # ---- API এরর চেক ----
         if response.status_code in (401, 403) or "message" in result:
             api_msg = result.get("message", "Limit Exceeded or Unauthorized")
             bot.edit_message_text(
@@ -74,17 +75,33 @@ def handle_message(message):
             )
             return
 
-        name = result.get("name") or result.get("fullName") or result.get("owner")
-        carrier = result.get("carrier") or result.get("operator")
-        location = result.get("location") or result.get("country") or result.get("address")
+        # ---- আসল নেস্টেড স্ট্রাকচার থেকে ডেটা বের করা ----
+        data = result.get("data") or {}
+        basic_info = data.get("basicInfo") or {}
+        name_info = basic_info.get("name") or {}
+        phone_info = data.get("phoneInfo") or {}
+        address_info = data.get("addressInfo") or {}
 
+        name = name_info.get("fullName") or ""
+        carrier = phone_info.get("carrier") or ""
+        country_code = phone_info.get("countryCode") or address_info.get("countryCode") or ""
+        number_type = phone_info.get("numberType") or ""
+        e164 = phone_info.get("e164Format") or f"+{number}"
+        city = address_info.get("city") or ""
+        address = address_info.get("address") or ""
+
+        location_parts = [p for p in [city, address, country_code] if p]
+        location = ", ".join(location_parts)
+
+        # ---- রেজাল্ট তৈরি ----
         if name or carrier or location:
             reply_text = (
                 f"🔍 **Real Result Found ✅**\n\n"
-                f"📱 **Number:** +{number}\n"
+                f"📱 **Number:** {e164}\n"
                 f"👤 **Name:** {name or 'পাওয়া যায়নি'}\n"
                 f"📶 **SIM Operator:** {carrier or 'পাওয়া যায়নি'}\n"
-                f"📍 **Location/State:** {location or 'পাওয়া যায়নি'}"
+                f"📍 **Location:** {location or 'পাওয়া যায়নি'}\n"
+                f"📞 **Type:** {number_type or 'পাওয়া যায়নি'}"
             )
         else:
             reply_text = "🔍 কোনো নির্দিষ্ট তথ্য পাওয়া যায়নি। নম্বরটি সঠিক কিনা চেক করুন।"
@@ -96,7 +113,8 @@ def handle_message(message):
             parse_mode='Markdown'
         )
 
-    except Exception:
+    except Exception as e:
+        print("Error:", e)  # Render log-এ দেখতে পাবেন
         bot.edit_message_text(
             "❌ এপিআই সার্ভারে কানেক্ট করতে সমস্যা হচ্ছে। দয়া করে একটু পর চেষ্টা করুন।",
             chat_id=message.chat.id,
